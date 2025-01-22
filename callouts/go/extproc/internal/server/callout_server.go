@@ -19,11 +19,20 @@ import (
 	"log"
 	"net"
 	"net/http"
+	//"context"
+	"time"
 
 	extproc "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/reflection"
+	//"google.golang.org/grpc/status"
+	//  "google.golang.org/grpc/codes"
+	"google.golang.org/grpc/peer"
+	// "google.golang.org/grpc/stream"
+	"github.com/prometheus/client_golang/prometheus"
+	//"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Config holds the server configuration parameters.
@@ -44,7 +53,7 @@ func loadConfig() Config {
 		HealthCheckAddress:   "0.0.0.0:8000",
 		CertFile:             "extproc/ssl_creds/localhost.crt",
 		KeyFile:              "extproc/ssl_creds/localhost.key",
-		EnableInsecureServer: true,
+		EnableInsecureServer: false,
 	}
 }
 
@@ -52,6 +61,22 @@ func loadConfig() Config {
 type CalloutServer struct {
 	Config Config
 	Cert   tls.Certificate
+}
+
+var (
+
+	// Define counters to track the number of requests processed by each method
+	requestCountCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "grpc_requests_total",
+			Help: "Total number of requests processed, by method",
+		},
+		[]string{"method"},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(requestCountCounter)
 }
 
 // NewCalloutServer creates a new CalloutServer with the given configuration.
@@ -72,16 +97,50 @@ func NewCalloutServer(config Config) *CalloutServer {
 	}
 }
 
-// StartGRPC starts the gRPC server with the specified service.
+func StreamLoggingInterceptor(
+	srv interface{}, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler,
+) error {
+	// Log the method being called
+	log.Printf("gRPC Stream - Method: %s", info.FullMethod)
+
+	// Extract metadata (headers) from the incoming stream context
+	md, _ := metadata.FromIncomingContext(stream.Context())
+	log.Printf("gRPC Stream Headers: %v", md)
+
+	// Log the peer (client) info
+	p, ok := peer.FromContext(stream.Context())
+	if ok {
+		log.Printf("gRPC Peer: %s", p.Addr)
+	}
+
+	// Create a custom handler to intercept messages sent or received in the stream
+	err := handler(srv, stream)
+
+	// Log each incoming and outgoing message (before and after handling)
+	log.Printf("gRPC Stream completed with error: %v", err)
+
+	return err
+}
+
 func (s *CalloutServer) StartGRPC(service extproc.ExternalProcessorServer) {
+	// Start listening on the configured address
 	lis, err := net.Listen("tcp", s.Config.Address)
 	if err != nil {
-		log.Fatalf("Failed to listen: %v", err)
+		log.Fatalf("Failed to listen on %v: %v", s.Config.Address, err)
 	}
+
 	creds := credentials.NewServerTLSFromCert(&s.Cert)
-	grpcServer := grpc.NewServer(grpc.Creds(creds))
+	grpcServer := grpc.NewServer(
+		grpc.Creds(creds),
+		grpc.StreamInterceptor(StreamLoggingInterceptor), // Attach the stream interceptor here
+	)
+
+	// Register the gRPC service
 	extproc.RegisterExternalProcessorServer(grpcServer, service)
 	reflection.Register(grpcServer)
+	log.Println("Reflection service registered.")
+
+	// Start the gRPC server
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("Failed to serve gRPC: %v", err)
 	}
@@ -153,7 +212,6 @@ type GRPCCalloutService struct {
 	Handlers HandlerRegistry
 }
 
-// Process processes incoming gRPC streams.
 func (s *GRPCCalloutService) Process(stream extproc.ExternalProcessor_ProcessServer) error {
 	for {
 		req, err := stream.Recv()
@@ -162,35 +220,67 @@ func (s *GRPCCalloutService) Process(stream extproc.ExternalProcessor_ProcessSer
 		}
 
 		var response *extproc.ProcessingResponse
+		var startTime time.Time // To hold start time for timing the request
+		var methodName string
+
 		switch {
 		case req.GetRequestHeaders() != nil:
 			if s.Handlers.RequestHeadersHandler != nil {
+				methodName = "RequestHeaders"
+				log.Printf("Request Headers: %v", req.GetRequestHeaders())
+				startTime = time.Now() // Record start time
 				response, err = s.Handlers.RequestHeadersHandler(req.GetRequestHeaders())
+				log.Printf("RequestHeadersHandler took %v", time.Since(startTime)) // Log the duration
 			}
 		case req.GetResponseHeaders() != nil:
 			if s.Handlers.ResponseHeadersHandler != nil {
+				methodName = "ResponseHeaders"
+				log.Printf("Response Headers: %v", req.GetResponseHeaders())
+				startTime = time.Now()
 				response, err = s.Handlers.ResponseHeadersHandler(req.GetResponseHeaders())
+				log.Printf("ResponseHeadersHandler took %v", time.Since(startTime))
 			}
 		case req.GetRequestBody() != nil:
 			if s.Handlers.RequestBodyHandler != nil {
+				methodName = "RequestBody"
+				log.Printf("Request Body: %v", req.GetRequestBody())
+				startTime = time.Now()
 				response, err = s.Handlers.RequestBodyHandler(req.GetRequestBody())
+				log.Printf("RequestBodyHandler took %v", time.Since(startTime))
 			}
 		case req.GetResponseBody() != nil:
 			if s.Handlers.ResponseBodyHandler != nil {
+				methodName = "ResponseBody"
+				log.Printf("Response Body: %v", req.GetResponseBody())
+				startTime = time.Now()
 				response, err = s.Handlers.ResponseBodyHandler(req.GetResponseBody())
+				log.Printf("ResponseBodyHandler took %v", time.Since(startTime))
 			}
 		case req.GetRequestTrailers() != nil:
 			if s.Handlers.RequestTrailersHandler != nil {
+				methodName = "RequestTrailers"
+				log.Printf("Request Trailers: %v", req.GetRequestTrailers())
+				startTime = time.Now()
 				response, err = s.Handlers.RequestTrailersHandler(req.GetRequestTrailers())
+				log.Printf("RequestTrailersHandler took %v", time.Since(startTime))
 			}
 		case req.GetResponseTrailers() != nil:
 			if s.Handlers.ResponseTrailersHandler != nil {
+				methodName = "ResponseTrailers"
+				log.Printf("Response Trailers: %v", req.GetResponseTrailers())
+				startTime = time.Now()
 				response, err = s.Handlers.ResponseTrailersHandler(req.GetResponseTrailers())
+				log.Printf("ResponseTrailersHandler took %v", time.Since(startTime))
 			}
 		}
 
 		if err != nil {
 			return err
+		}
+		// Record the metrics after processing the request
+		if methodName != "" {
+			// Increment the request count for the method
+			requestCountCounter.WithLabelValues(methodName).Inc()
 		}
 
 		if response != nil {

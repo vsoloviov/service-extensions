@@ -16,7 +16,7 @@
 FROM marketplace.gcr.io/google/debian12 AS builder
 
 # Set the Go version
-ENV GO_VERSION 1.22.3
+ENV GO_VERSION 1.22.9
 
 # Install Go
 RUN apt-get update && apt-get install -y wget \
@@ -34,21 +34,26 @@ WORKDIR /app
 
 # Copy go mod and sum files
 COPY go.mod go.sum ./
-
 # Download all dependencies. Dependencies will be cached if the go.mod and go.sum files are not changed
 RUN go mod download
 
 # Copy the source from the current directory to the Working Directory inside the container
 COPY . .
 
+RUN go install github.com/DataDog/orchestrion@latest
+RUN orchestrion pin
+
+# Download all dependencies. Dependencies will be cached if the go.mod and go.sum files are not changed
+RUN go mod download
+
 # Build the Go app
 ARG EXAMPLE_TYPE
 ENV EXAMPLE_TYPE=${EXAMPLE_TYPE}
-RUN GOOS=linux GOARCH=amd64 go build -o main ./extproc/cmd/example/main.go
+RUN GOOS=linux GOARCH=amd64 go build -toolexec="orchestrion toolexec" -o main ./extproc/cmd/example/main.go
 
 # Use the same image for the final stage
 FROM marketplace.gcr.io/google/debian12
-
+RUN apt-get update && apt-get install -y curl tcpdump net-tools && apt-get clean all
 # Set the Current Working Directory inside the container
 WORKDIR /root/
 

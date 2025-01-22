@@ -16,6 +16,8 @@ package main
 
 import (
 	"fmt"
+	"log"
+	"net/http"
 	"os"
 
 	"github.com/GoogleCloudPlatform/service-extensions/callouts/go/extproc/examples/add_body"
@@ -25,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/service-extensions/callouts/go/extproc/examples/redirect"
 	"github.com/GoogleCloudPlatform/service-extensions/callouts/go/extproc/internal/server"
 	extproc "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // ExampleService defines the interface that all example services must implement.
@@ -53,12 +56,21 @@ func main() {
 		return
 	}
 
+	http.Handle("/metrics", promhttp.Handler())
+
+	go func() {
+		if err := http.ListenAndServe(":8080", nil); err != nil {
+			log.Fatalf("Error starting Prometheus HTTP server: %v", err)
+		}
+	}()
+
 	config := server.Config{
-		Address:            "0.0.0.0:8443",
-		InsecureAddress:    "0.0.0.0:8181",
-		HealthCheckAddress: "0.0.0.0:8000",
-		CertFile:           "extproc/ssl_creds/localhost.crt",
-		KeyFile:            "extproc/ssl_creds/localhost.key",
+		Address:              "0.0.0.0:8443",
+		InsecureAddress:      "0.0.0.0:8181",
+		HealthCheckAddress:   "0.0.0.0:8000",
+		CertFile:             "extproc/ssl_creds/localhost.crt",
+		KeyFile:              "extproc/ssl_creds/localhost.key",
+		EnableInsecureServer: true,
 	}
 
 	calloutServer := server.NewCalloutServer(config)
