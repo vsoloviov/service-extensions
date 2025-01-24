@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	//"context"
+	"os"
 	"time"
 
 	extproc "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -29,9 +30,8 @@ import (
 	"google.golang.org/grpc/reflection"
 	//"google.golang.org/grpc/status"
 	//  "google.golang.org/grpc/codes"
-	"google.golang.org/grpc/peer"
-	// "google.golang.org/grpc/stream"
 	"github.com/prometheus/client_golang/prometheus"
+	"google.golang.org/grpc/peer"
 	//"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -111,13 +111,14 @@ func StreamLoggingInterceptor(
 	p, ok := peer.FromContext(stream.Context())
 	if ok {
 		log.Printf("gRPC Peer: %s", p.Addr)
+		log.Printf("gRPC Local Addr: %s", p.LocalAddr)
 	}
 
 	// Create a custom handler to intercept messages sent or received in the stream
 	err := handler(srv, stream)
-
-	// Log each incoming and outgoing message (before and after handling)
-	log.Printf("gRPC Stream completed with error: %v", err)
+	if err != nil {
+		log.Printf("gRPC Stream completed with error: %v", err)
+	}
 
 	return err
 }
@@ -213,6 +214,9 @@ type GRPCCalloutService struct {
 }
 
 func (s *GRPCCalloutService) Process(stream extproc.ExternalProcessor_ProcessServer) error {
+	seededRand := "none"
+	md, _ := metadata.FromIncomingContext(stream.Context())
+	xRequestId := md["x-request-id"]
 	for {
 		req, err := stream.Recv()
 		if err != nil {
@@ -227,50 +231,56 @@ func (s *GRPCCalloutService) Process(stream extproc.ExternalProcessor_ProcessSer
 		case req.GetRequestHeaders() != nil:
 			if s.Handlers.RequestHeadersHandler != nil {
 				methodName = "RequestHeaders"
-				log.Printf("Request Headers: %v", req.GetRequestHeaders())
+				headers := req.GetRequestHeaders().GetHeaders().GetHeaders()
+				for _, element := range headers {
+					if element.Key == os.Getenv("REQUEST_HEADER_IDENTIFIER_KEY") && xRequestId != nil {
+						seededRand = element.Key + "-" + string(element.RawValue[:]) + " " + xRequestId[0]
+					}
+				}
+				log.Printf("[%v] Request Headers: %v", seededRand, req.GetRequestHeaders().Headers)
 				startTime = time.Now() // Record start time
 				response, err = s.Handlers.RequestHeadersHandler(req.GetRequestHeaders())
-				log.Printf("RequestHeadersHandler took %v", time.Since(startTime)) // Log the duration
+				log.Printf("[%v] RequestHeadersHandler took %v", seededRand, time.Since(startTime)) // Log the duration
 			}
 		case req.GetResponseHeaders() != nil:
 			if s.Handlers.ResponseHeadersHandler != nil {
 				methodName = "ResponseHeaders"
-				log.Printf("Response Headers: %v", req.GetResponseHeaders())
+				log.Printf("[%v] Response Headers: %v", seededRand, req.GetResponseHeaders())
 				startTime = time.Now()
 				response, err = s.Handlers.ResponseHeadersHandler(req.GetResponseHeaders())
-				log.Printf("ResponseHeadersHandler took %v", time.Since(startTime))
+				log.Printf("[%v] ResponseHeadersHandler took %v", seededRand, time.Since(startTime))
 			}
 		case req.GetRequestBody() != nil:
 			if s.Handlers.RequestBodyHandler != nil {
 				methodName = "RequestBody"
-				log.Printf("Request Body: %v", req.GetRequestBody())
+				log.Printf("[%v] Request Body: %v", seededRand, req.GetRequestBody())
 				startTime = time.Now()
 				response, err = s.Handlers.RequestBodyHandler(req.GetRequestBody())
-				log.Printf("RequestBodyHandler took %v", time.Since(startTime))
+				log.Printf("[%v] RequestBodyHandler took %v", seededRand, time.Since(startTime))
 			}
 		case req.GetResponseBody() != nil:
 			if s.Handlers.ResponseBodyHandler != nil {
 				methodName = "ResponseBody"
-				log.Printf("Response Body: %v", req.GetResponseBody())
+				log.Printf("[%v] Response Body: %v", seededRand, req.GetResponseBody())
 				startTime = time.Now()
 				response, err = s.Handlers.ResponseBodyHandler(req.GetResponseBody())
-				log.Printf("ResponseBodyHandler took %v", time.Since(startTime))
+				log.Printf("[%v] ResponseBodyHandler took %v", seededRand, time.Since(startTime))
 			}
 		case req.GetRequestTrailers() != nil:
 			if s.Handlers.RequestTrailersHandler != nil {
 				methodName = "RequestTrailers"
-				log.Printf("Request Trailers: %v", req.GetRequestTrailers())
+				log.Printf("[%v] Request Trailers: %v", seededRand, req.GetRequestTrailers())
 				startTime = time.Now()
 				response, err = s.Handlers.RequestTrailersHandler(req.GetRequestTrailers())
-				log.Printf("RequestTrailersHandler took %v", time.Since(startTime))
+				log.Printf("[%v] RequestTrailersHandler took %v", seededRand, time.Since(startTime))
 			}
 		case req.GetResponseTrailers() != nil:
 			if s.Handlers.ResponseTrailersHandler != nil {
 				methodName = "ResponseTrailers"
-				log.Printf("Response Trailers: %v", req.GetResponseTrailers())
+				log.Printf("[%v] Response Trailers: %v", seededRand, req.GetResponseTrailers())
 				startTime = time.Now()
 				response, err = s.Handlers.ResponseTrailersHandler(req.GetResponseTrailers())
-				log.Printf("ResponseTrailersHandler took %v", time.Since(startTime))
+				log.Printf("[%v] ResponseTrailersHandler took %v", seededRand, time.Since(startTime))
 			}
 		}
 
@@ -293,6 +303,7 @@ func (s *GRPCCalloutService) Process(stream extproc.ExternalProcessor_ProcessSer
 
 // HandleRequestHeaders handles request headers.
 func (s *GRPCCalloutService) HandleRequestHeaders(headers *extproc.HttpHeaders) (*extproc.ProcessingResponse, error) {
+	log.Printf("Handle request headers: %x", headers)
 	return &extproc.ProcessingResponse{
 		Response: &extproc.ProcessingResponse_RequestHeaders{
 			RequestHeaders: &extproc.HeadersResponse{},
@@ -302,6 +313,7 @@ func (s *GRPCCalloutService) HandleRequestHeaders(headers *extproc.HttpHeaders) 
 
 // HandleResponseHeaders handles response headers.
 func (s *GRPCCalloutService) HandleResponseHeaders(headers *extproc.HttpHeaders) (*extproc.ProcessingResponse, error) {
+	log.Printf("Handle response headers: %x", headers)
 	return &extproc.ProcessingResponse{
 		Response: &extproc.ProcessingResponse_ResponseHeaders{
 			ResponseHeaders: &extproc.HeadersResponse{},
@@ -311,6 +323,7 @@ func (s *GRPCCalloutService) HandleResponseHeaders(headers *extproc.HttpHeaders)
 
 // HandleRequestBody handles request bodies.
 func (s *GRPCCalloutService) HandleRequestBody(body *extproc.HttpBody) (*extproc.ProcessingResponse, error) {
+	log.Printf("Handle request body: %x", body)
 	return &extproc.ProcessingResponse{
 		Response: &extproc.ProcessingResponse_RequestBody{
 			RequestBody: &extproc.BodyResponse{},
@@ -320,6 +333,7 @@ func (s *GRPCCalloutService) HandleRequestBody(body *extproc.HttpBody) (*extproc
 
 // HandleResponseBody handles response bodies.
 func (s *GRPCCalloutService) HandleResponseBody(body *extproc.HttpBody) (*extproc.ProcessingResponse, error) {
+	log.Printf("Handle response body: %x", body)
 	return &extproc.ProcessingResponse{
 		Response: &extproc.ProcessingResponse_ResponseBody{
 			ResponseBody: &extproc.BodyResponse{},
@@ -329,6 +343,7 @@ func (s *GRPCCalloutService) HandleResponseBody(body *extproc.HttpBody) (*extpro
 
 // HandleRequestTrailers handles request trailers.
 func (s *GRPCCalloutService) HandleRequestTrailers(trailers *extproc.HttpTrailers) (*extproc.ProcessingResponse, error) {
+	log.Printf("Handle request trailers: %x", trailers)
 	return &extproc.ProcessingResponse{
 		Response: &extproc.ProcessingResponse_RequestTrailers{
 			RequestTrailers: &extproc.TrailersResponse{},
@@ -338,6 +353,7 @@ func (s *GRPCCalloutService) HandleRequestTrailers(trailers *extproc.HttpTrailer
 
 // HandleResponseTrailers handles response trailers.
 func (s *GRPCCalloutService) HandleResponseTrailers(trailers *extproc.HttpTrailers) (*extproc.ProcessingResponse, error) {
+	log.Printf("Handle response trailers: %x", trailers)
 	return &extproc.ProcessingResponse{
 		Response: &extproc.ProcessingResponse_ResponseTrailers{
 			ResponseTrailers: &extproc.TrailersResponse{},
